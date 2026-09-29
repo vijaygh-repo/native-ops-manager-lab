@@ -307,6 +307,10 @@ NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
   --argjson p1 "${RS_PORTS[1]}" \
   --argjson p2 "${RS_PORTS[2]}" '
   .auth.disabled = true |
+  .monitoringVersions = [{hostname:$host, logPath:"/var/log/mongodb-mms-automation/monitoring-agent.log",
+    logRotate:{sizeThresholdMB:1000, timeThresholdHrs:24}}] |
+  .backupVersions = [{hostname:$host, logPath:"/var/log/mongodb-mms-automation/backup-agent.log",
+    logRotate:{sizeThresholdMB:1000, timeThresholdHrs:24}}] |
   $versionSpecFile[0] as $versionSpec |
   .version += 1 |
   .mongoDbVersions = (((.mongoDbVersions // []) | map(select(.name != $versionSpec.name))) + [$versionSpec]) |
