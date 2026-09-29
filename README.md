@@ -4,22 +4,22 @@ A single-EC2-instance lab that installs **Ops Manager directly on the host**
 via the traditional rpm install - no K3s, no kind, no MongoDB Kubernetes
 Operator. Everything is colocated on one VM:
 
-- A single-node MongoDB replica set as the Ops Manager **Application Database (AppDB)**
+- A single-node **MongoDB Enterprise 8.0** replica set as the Ops Manager **Application Database (AppDB)**
 - **Ops Manager 9.0.0** itself
 - The **MongoDB Automation Agent**, deploying on the same host:
-  - `oplog-rs` - a 1-node replica set used as the Backup **Oplog Store**
-  - `my-replica-set` - the 3-node workload replica set
+  - `oplog-rs` - a 1-node **Enterprise** replica set used as the Backup **Oplog Store**
+  - `my-replica-set` - a 3-node **Enterprise** workload replica set
 - Backup uses a **Filesystem Snapshot Store** (a local directory), not a
   Blockstore replica set
 
 ```mermaid
 flowchart TB
     subgraph EC2["EC2 instance (single VM)"]
-        APPDB["AppDB (1-node replica set)\nport 27017"]
+        APPDB["AppDB (Enterprise 8.0, 1 node)\nport 27017"]
         OM["Ops Manager 9.0.0\nport 8080"]
         AGENT["MongoDB Automation Agent"]
-        OPLOG["oplog-rs (1 node)\nport 37017"]
-        RS["my-replica-set (3 nodes)\nports 37018-37020"]
+        OPLOG["oplog-rs (Enterprise 7.0.14, 1 node)\nport 37017"]
+        RS["my-replica-set (Enterprise 7.0.14, 3 nodes)\nports 37018-37020"]
         FS["Filesystem Snapshot Store\n(local directory)"]
     end
     OM --> APPDB
@@ -32,7 +32,8 @@ flowchart TB
 
 ## Prerequisites
 
-- One EC2 instance, **Amazon Linux 2023**, `x86_64`.
+- One **fresh** EC2 instance, **Amazon Linux 2023**, `x86_64`. The script stops
+  if it finds Community MongoDB RPMs; it does not convert an existing install.
   - Recommended: `m5.xlarge` (4 vCPU / 16 GiB) or larger, 50+ GiB gp3 root
     volume. AppDB + Ops Manager + a 1-node oplog store + a 3-node replica set
     on one host adds up.
@@ -55,10 +56,12 @@ chmod +x native-ops-manager-lab.sh
 sudo ./native-ops-manager-lab.sh
 ```
 
-The script installs MongoDB Enterprise 8.0 for the AppDB. If an earlier run
-installed Community packages, it stops `mongod`, removes those RPM packages,
-and installs Enterprise while preserving the existing `/var/lib/mongo` data.
-It downloads and verifies the Ops Manager RPM before changing the AppDB packages.
+The script requires a fresh VM and installs MongoDB Enterprise 8.0 for the AppDB
+from the start. It aborts if Community MongoDB RPMs are detected; it does not
+convert an existing Community installation. `oplog-rs` and all three
+`my-replica-set` nodes are deployed using the Enterprise `7.0.14-ent` version
+manifest entry. The script downloads and verifies the Ops Manager RPM before
+installing MongoDB packages.
 
 The script installs and bootstraps Ops Manager, deploys the AppDB and managed
 replica sets, configures the Backup Daemon and filesystem/oplog stores through
@@ -126,6 +129,5 @@ cleanup script since nothing is created outside this VM.
   only) to keep the automation config simple - do not do this outside a lab.
 - Single-node AppDB and single-node oplog store are not highly available;
   this is a functional/test setup, not a production topology.
-- The AppDB uses MongoDB Enterprise 8.0. The automation configuration for
-  `oplog-rs` and `my-replica-set` is separate; choose Enterprise binaries in
-  Ops Manager if those managed deployments also need Enterprise-only features.
+- AppDB runs MongoDB Enterprise 8.0. The oplog store and workload replica set
+  run MongoDB Enterprise 7.0.14.

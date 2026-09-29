@@ -21,7 +21,7 @@ OM_BUILD="9.0.0.500.20260921T1537Z"
 OM_RPM="mongodb-mms-${OM_BUILD}.x86_64.rpm"
 OM_RPM_URL="https://downloads.mongodb.com/on-prem-mms/rpm/${OM_RPM}"
 APPDB_VERSION="8.0"
-MDB_VERSION="7.0.14"
+MDB_VERSION="7.0.14-ent"
 OM_LOCAL_URL="http://127.0.0.1:8080"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OM_RPM_PATH="${OM_RPM_PATH:-${SCRIPT_DIR}/${OM_RPM}}"
@@ -47,8 +47,9 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: base packages
 # ---------------------------------------------------------------------------
-log "Installing base packages (jq, openssl, initscripts)"
-dnf install -y jq openssl initscripts >/dev/null
+log "Installing base packages and MongoDB Enterprise runtime dependencies"
+dnf install -y jq openssl initscripts cyrus-sasl cyrus-sasl-gssapi \
+  cyrus-sasl-plain krb5-libs openldap xz-libs >/dev/null
 
 if [ ! -s "$OM_RPM_PATH" ]; then
   log "Downloading Ops Manager ${OM_VERSION}"
@@ -68,10 +69,10 @@ log "Installing MongoDB Enterprise ${APPDB_VERSION} for the AppDB"
 community_packages=()
 mapfile -t community_packages < <(rpm -qa 'mongodb-org*')
 if [ "${#community_packages[@]}" -gt 0 ]; then
-  log "Replacing Community RPMs with Enterprise RPMs; preserving /var/lib/mongo"
-  cp -a /etc/mongod.conf /tmp/native-ops-manager-mongod.conf
-  systemctl stop mongod || true
-  dnf remove -y "${community_packages[@]}" >/dev/null
+  printf 'This lab requires a fresh VM; Community MongoDB RPMs are installed:\n' >&2
+  printf '  %s\n' "${community_packages[@]}" >&2
+  echo "Use a clean VM; this script intentionally does not convert Community installations." >&2
+  exit 1
 fi
 rm -f /etc/yum.repos.d/mongodb-org.repo
 rm -f /etc/yum.repos.d/mongodb-enterprise-7.0.repo
@@ -84,9 +85,6 @@ enabled=1
 gpgkey=https://pgp.mongodb.com/server-8.0.asc
 EOF
 dnf install -y mongodb-enterprise >/dev/null
-if [ -s /tmp/native-ops-manager-mongod.conf ]; then
-  cp -a /tmp/native-ops-manager-mongod.conf /etc/mongod.conf
-fi
 
 sed -i 's/^  bindIp:.*/  bindIp: 127.0.0.1/' /etc/mongod.conf
 if ! grep -q "^replication:" /etc/mongod.conf; then
@@ -209,35 +207,48 @@ log "Host registered in Ops Manager as: ${HOSTNAME_IN_OM}"
 # ---------------------------------------------------------------------------
 # Step 8: build and push the automation config (oplog store + 3-node RS)
 # ---------------------------------------------------------------------------
-log "Pushing automation config: oplog-rs (1 node) + my-replica-set (3 nodes)"
+log "Pushing automation config: Enterprise ${MDB_VERSION} oplog-rs (1 node) + my-replica-set (3 nodes)"
+MDB_VERSION_SPEC=$(curl -fsSL "https://opsmanager.mongodb.com/static/version_manifest/7.0.json" | \
+  jq -ce --arg version "$MDB_VERSION" '.versions[] | select(.name == $version)')
+if ! echo "$MDB_VERSION_SPEC" | jq -e \
+  '[.builds[] | select(.platform == "linux" and .flavor == "amazon2023" and .architecture == "amd64" and (.modules | index("enterprise")))] | length > 0' >/dev/null; then
+  echo "Enterprise build ${MDB_VERSION} is not available for Amazon Linux 2023 x86_64." >&2
+  exit 1
+fi
 CURRENT_CONFIG=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automationConfig")
 
 NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
   --arg host "$HOSTNAME_IN_OM" \
   --arg version "$MDB_VERSION" \
+  --argjson versionSpec "$MDB_VERSION_SPEC" \
   --argjson oplogPort "$OPLOG_RS_PORT" \
   --argjson p0 "${RS_PORTS[0]}" \
   --argjson p1 "${RS_PORTS[1]}" \
   --argjson p2 "${RS_PORTS[2]}" '
   .auth.disabled = true |
   .version += 1 |
+  .mongoDbVersions = (((.mongoDbVersions // []) | map(select(.name != $versionSpec.name))) + [$versionSpec]) |
   .processes += [
     {name:"oplog-rs-0", processType:"mongod", version:$version, hostname:$host,
+     authSchemaVersion:5, featureCompatibilityVersion:"7.0",
      args2_6:{net:{port:$oplogPort}, storage:{dbPath:"/data/oplog-rs"},
               systemLog:{destination:"file", path:"/data/oplog-rs/mongod.log"},
               replication:{replSetName:"oplog-rs"}},
      logRotate:{sizeThresholdMB:1000, timeThresholdHrs:24}},
     {name:"my-replica-set-0", processType:"mongod", version:$version, hostname:$host,
+     authSchemaVersion:5, featureCompatibilityVersion:"7.0",
      args2_6:{net:{port:$p0}, storage:{dbPath:"/data/my-replica-set/rs0"},
               systemLog:{destination:"file", path:"/data/my-replica-set/rs0/mongod.log"},
               replication:{replSetName:"my-replica-set"}},
      logRotate:{sizeThresholdMB:1000, timeThresholdHrs:24}},
     {name:"my-replica-set-1", processType:"mongod", version:$version, hostname:$host,
+     authSchemaVersion:5, featureCompatibilityVersion:"7.0",
      args2_6:{net:{port:$p1}, storage:{dbPath:"/data/my-replica-set/rs1"},
               systemLog:{destination:"file", path:"/data/my-replica-set/rs1/mongod.log"},
               replication:{replSetName:"my-replica-set"}},
      logRotate:{sizeThresholdMB:1000, timeThresholdHrs:24}},
     {name:"my-replica-set-2", processType:"mongod", version:$version, hostname:$host,
+     authSchemaVersion:5, featureCompatibilityVersion:"7.0",
      args2_6:{net:{port:$p2}, storage:{dbPath:"/data/my-replica-set/rs2"},
               systemLog:{destination:"file", path:"/data/my-replica-set/rs2/mongod.log"},
               replication:{replSetName:"my-replica-set"}},
@@ -398,9 +409,11 @@ HOW TO LOG IN:
   These are also saved on this host at ${CREDS_FILE} (root-readable only)
   in case you lose this terminal output - copy them somewhere safe now.
 
-    Project:         ${PROJECT_NAME}
-    Deployments:     oplog-rs (1 node, port ${OPLOG_RS_PORT})
-               my-replica-set (3 nodes, ports ${RS_PORTS[*]})
-    Backup:          enabled; filesystem store ${SNAPSHOT_STORE_DIR}
-    Initial snapshot: ${ON_DEMAND_DESCRIPTION}
+  Project:         ${PROJECT_NAME}
+  AppDB:           MongoDB Enterprise ${APPDB_VERSION} (1 node)
+  Deployments:     MongoDB Enterprise ${MDB_VERSION}
+                   oplog-rs (1 node, port ${OPLOG_RS_PORT})
+                   my-replica-set (3 nodes, ports ${RS_PORTS[*]})
+  Backup:          enabled; filesystem store ${SNAPSHOT_STORE_DIR}
+  Initial snapshot: ${ON_DEMAND_DESCRIPTION}
 EOF
