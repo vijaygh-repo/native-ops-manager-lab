@@ -6,7 +6,7 @@ Operator. Everything is colocated on one VM:
 
 - A 3-node (one host, ports 27017-27019) **MongoDB Enterprise 8.0** replica set as the Ops Manager **Application Database (AppDB)**
 - **Ops Manager 9.0.0** itself
-- The **MongoDB Automation Agent**, deploying on the same host:
+- The **MongoDB Automation Agent** (with monitoring and backup enabled on the host), deploying on the same host:
   - `oplog-rs` - a 1-node **Enterprise** replica set used as the Backup **Oplog Store**
   - `my-replica-set` - a 3-node **Enterprise** workload replica set
 - Backup uses a **Filesystem Snapshot Store** (a local directory), not a
@@ -73,6 +73,8 @@ Total time: 10-20 minutes, mostly package downloads and Ops Manager's first boot
 
 To repeat a failed run on the same VM, use `sudo RESET_OM=1 ./native-ops-manager-lab.sh`.
 It wipes Ops Manager state (users, projects, agent, managed deployments) but keeps the installed packages.
+The script prints Ops Manager's own error message when an API call fails, and dumps the
+Ops Manager logs if the service does not start.
 
 ## How to log into the Ops Manager UI afterwards
 
@@ -112,11 +114,13 @@ reports the result of that snapshot request.
 
 ```bash
 systemctl status mongod mongodb-mms mongodb-mms-automation-agent
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/user/login   # expect 200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/user/login   # expect 200 or 303 (redirect)
 ```
 
 In the UI: **Deployment** should show `oplog-rs` (1 member) and
-`my-replica-set` (3 members) both green/healthy. The `my-replica-set` Backup
+`my-replica-set` (3 members) both green/healthy. Under **Servers**, the
+Monitoring and Backup agents should be `active` (a few minutes after the script
+finishes). The `my-replica-set` Backup
 tab should show backup as started; the initial on-demand snapshot should
 complete automatically after the run finishes.
 
@@ -134,3 +138,8 @@ cleanup script since nothing is created outside this VM.
   this is a functional/test setup, not a production topology.
 - AppDB runs MongoDB Enterprise 8.0. The oplog store and workload replica set
   run MongoDB Enterprise 7.0.14.
+- `mms.centralUrl` is set to the instance's **private** IP. The agents run on
+  the same host and time out when they connect to the instance's own public IP.
+  The login URL the script prints uses the public IP, which works from a browser.
+- Ops Manager 9 refuses to start against an AppDB with fewer than 3 replica
+  set members, hence the 3-node AppDB on one host.
