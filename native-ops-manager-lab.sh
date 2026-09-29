@@ -176,6 +176,9 @@ imds() { curl -fsS -m 2 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" "http://169
 EC2_IP="$(imds public-ipv4)"
 [ -n "$EC2_IP" ] || EC2_IP="$(imds local-ipv4)"
 [ -n "$EC2_IP" ] || EC2_IP="$(hostname -I | awk '{print $1}')"
+# Agents on this host time out on the instance's own public IP, so centralUrl uses the private one.
+PRIVATE_IP="$(imds local-ipv4)"
+[ -n "$PRIVATE_IP" ] || PRIVATE_IP="$(hostname -I | awk '{print $1}')"
 
 CONF=/opt/mongodb/mms/conf/conf-mms.properties
 log "Writing $CONF"
@@ -183,7 +186,7 @@ sed -i '/^# native-om-lab begin/,/^# native-om-lab end/d' "$CONF"
 cat >> "$CONF" <<EOF
 # native-om-lab begin
 mongo.mongoUri=mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=appdb
-mms.centralUrl=http://${EC2_IP}:8080
+mms.centralUrl=http://${PRIVATE_IP}:8080
 mms.ignoreInitialUiSetup=true
 mms.user.invitationOnly=true
 mms.fromEmailAddr=mms-alerts@example.com
