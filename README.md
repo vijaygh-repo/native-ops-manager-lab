@@ -41,6 +41,23 @@ flowchart TB
 - Outbound internet access (downloads the Ops Manager rpm, MongoDB packages,
   and the Automation Agent installs MongoDB binaries for the managed replica sets).
 
+## Download the Ops Manager RPM first
+
+The raw RPM URL can return HTTP 403. Download the package through MongoDB's
+official [Ops Manager download center](https://www.mongodb.com/try/download/ops-manager)
+instead. Select **8.0.26**, **Amazon Linux 2023**, and **RPM**. The downloaded
+file must be named `mongodb-mms-8.0.26.x86_64.rpm`.
+
+Copy it to the EC2 instance, for example:
+
+```bash
+scp -i <ec2-key.pem> mongodb-mms-8.0.26.x86_64.rpm \
+  ec2-user@<ec2-public-ip>:/tmp/
+```
+
+The script verifies the RPM's MongoDB signature before installing it. If the
+file is elsewhere, provide its path with `OM_RPM_PATH` in the run command below.
+
 ## Run it (one command, as root)
 
 ```bash
@@ -48,15 +65,20 @@ git clone https://github.com/vijaygh-repo/native-ops-manager-lab.git
 cd native-ops-manager-lab
 chmod +x native-ops-manager-lab.sh
 
-sudo ./native-ops-manager-lab.sh
+sudo env OM_RPM_PATH=/tmp/mongodb-mms-8.0.26.x86_64.rpm \
+  ./native-ops-manager-lab.sh
 ```
 
-This is fully unattended end to end **except one step**: enabling the Backup
-Daemon and its Filesystem Snapshot Store for the first time is a short Admin
-UI wizard in Ops Manager (there is no stable public API for that specific
-one-time setup, unlike the user/org/project bootstrap, which does have one and
-is fully scripted). The script prints exactly what to click once it finishes -
-see "Enabling backup" below.
+The script installs MongoDB Enterprise 7.0 for the AppDB. If an earlier run
+installed Community packages, it stops `mongod`, removes those RPM packages,
+and installs Enterprise while preserving the existing `/var/lib/mongo` data.
+It checks for the Ops Manager RPM before changing the AppDB packages.
+
+After the RPM is downloaded and copied to EC2, the script handles the install
+and bootstrap. One UI step remains: enabling the Backup Daemon and Filesystem
+Snapshot Store for the first time is a short Ops Manager Admin wizard. The
+script prints exactly what to click once it finishes - see "Enabling backup"
+below.
 
 Total time: 10-20 minutes, mostly package downloads and Ops Manager's first boot.
 
@@ -125,5 +147,6 @@ cleanup script since nothing is created outside this VM.
   only) to keep the automation config simple - do not do this outside a lab.
 - Single-node AppDB and single-node oplog store are not highly available;
   this is a functional/test setup, not a production topology.
-- MongoDB Community edition is used for the AppDB and managed replica sets;
-  swap for Enterprise binaries if you need Enterprise-only features.
+- The AppDB uses MongoDB Enterprise 7.0. The automation configuration for
+  `oplog-rs` and `my-replica-set` is separate; choose Enterprise binaries in
+  Ops Manager if those managed deployments also need Enterprise-only features.

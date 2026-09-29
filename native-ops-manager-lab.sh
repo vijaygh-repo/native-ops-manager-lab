@@ -9,10 +9,9 @@
 #
 # Run as: sudo ./native-ops-manager-lab.sh
 #
-# Fully automated except one step flagged clearly below: enabling the Backup
-# Daemon + Filesystem Snapshot Store is a first-time Admin UI wizard in Ops
-# Manager itself (there is no documented public API for it), so this script
-# gets everything else running and then tells you exactly what to click.
+# Place the signed Ops Manager RPM beside this script before running; MongoDB's
+# direct RPM URL returns 403. The Backup Daemon and Filesystem Store still need
+# their one-time first-run configuration in the Ops Manager UI.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -21,7 +20,8 @@ set -euo pipefail
 OM_VERSION="8.0.26"
 MDB_VERSION="7.0.14"
 OM_RPM="mongodb-mms-${OM_VERSION}.x86_64.rpm"
-OM_RPM_URL="https://downloads.mongodb.com/on-prem-mms/rpm/${OM_RPM}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OM_RPM_PATH="${OM_RPM_PATH:-${SCRIPT_DIR}/${OM_RPM}}"
 
 OM_ADMIN_USER="admin@example.com"
 OM_ADMIN_PASSWORD="$(openssl rand -base64 18)Aa1!"
@@ -44,19 +44,49 @@ fi
 log "Installing base packages (jq, openssl, initscripts)"
 dnf install -y jq openssl initscripts >/dev/null
 
+if [ ! -s "$OM_RPM_PATH" ]; then
+  cat >&2 <<EOF
+Ops Manager ${OM_VERSION} RPM is required before the lab can continue.
+The direct downloads.mongodb.com URL returned HTTP 403, so download it from:
+  https://www.mongodb.com/try/download/ops-manager
+Select version ${OM_VERSION}, Amazon Linux 2023, RPM, then copy the file here:
+  ${SCRIPT_DIR}/${OM_RPM}
+Or rerun with OM_RPM_PATH=/absolute/path/to/${OM_RPM}.
+The AppDB packages have not been changed by this run.
+EOF
+  exit 1
+fi
+
+log "Verifying Ops Manager RPM signature"
+curl -fsSL "https://pgp.mongodb.com/opsmanager-${OM_VERSION%.*}.asc" -o /tmp/opsmanager-signing-key.asc
+rpm --import /tmp/opsmanager-signing-key.asc
+rpm -K "$OM_RPM_PATH"
+
 # ---------------------------------------------------------------------------
 # Step 2: AppDB - single-node MongoDB replica set backing Ops Manager itself
 # ---------------------------------------------------------------------------
-log "Installing MongoDB ${MDB_VERSION%.*} Community for the AppDB"
-cat > /etc/yum.repos.d/mongodb-org.repo <<EOF
-[mongodb-org-${MDB_VERSION%.*}]
-name=MongoDB Repository
-baseurl=https://repo.mongodb.org/yum/redhat/9/mongodb-org/${MDB_VERSION%.*}/x86_64/
+log "Installing MongoDB ${MDB_VERSION%.*} Enterprise for the AppDB"
+community_packages=()
+mapfile -t community_packages < <(rpm -qa 'mongodb-org*')
+if [ "${#community_packages[@]}" -gt 0 ]; then
+  log "Replacing Community RPMs with Enterprise RPMs; preserving /var/lib/mongo"
+  cp -a /etc/mongod.conf /tmp/native-ops-manager-mongod.conf
+  systemctl stop mongod || true
+  dnf remove -y "${community_packages[@]}" >/dev/null
+fi
+rm -f /etc/yum.repos.d/mongodb-org.repo
+cat > /etc/yum.repos.d/mongodb-enterprise-7.0.repo <<EOF
+[mongodb-enterprise-7.0]
+name=MongoDB Enterprise Repository
+baseurl=https://repo.mongodb.com/yum/amazon/2023/mongodb-enterprise/7.0/\$basearch/
 gpgcheck=1
 enabled=1
-gpgkey=https://pgp.mongodb.com/server-${MDB_VERSION%.*}.asc
+gpgkey=https://pgp.mongodb.com/server-7.0.asc
 EOF
-dnf install -y mongodb-org >/dev/null
+dnf install -y mongodb-enterprise >/dev/null
+if [ -s /tmp/native-ops-manager-mongod.conf ]; then
+  cp -a /tmp/native-ops-manager-mongod.conf /etc/mongod.conf
+fi
 
 sed -i 's/^  bindIp:.*/  bindIp: 127.0.0.1/' /etc/mongod.conf
 if ! grep -q "^replication:" /etc/mongod.conf; then
@@ -75,9 +105,8 @@ log "AppDB replica set 'appdb' is up on 127.0.0.1:27017"
 # ---------------------------------------------------------------------------
 # Step 3: install and start Ops Manager
 # ---------------------------------------------------------------------------
-log "Downloading Ops Manager ${OM_VERSION}"
-curl -fsSL -o "/tmp/${OM_RPM}" "$OM_RPM_URL"
-dnf install -y "/tmp/${OM_RPM}" >/dev/null
+log "Installing Ops Manager ${OM_VERSION}"
+dnf install -y "$OM_RPM_PATH" >/dev/null
 
 EC2_IP="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/local-ipv4 || hostname -I | awk '{print $1}')"
 
