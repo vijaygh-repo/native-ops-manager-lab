@@ -9,17 +9,20 @@
 #
 # Run as: sudo ./native-ops-manager-lab.sh
 #
-# Place the signed Ops Manager RPM beside this script before running; MongoDB's
-# direct RPM URL returns 403. The Backup Daemon and Filesystem Store still need
-# their one-time first-run configuration in the Ops Manager UI.
+# Downloads and verifies the signed Ops Manager RPM, then configures backup
+# through the Ops Manager API without requiring UI setup.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-OM_VERSION="8.0.26"
+OM_VERSION="9.0.0"
+OM_BUILD="9.0.0.500.20260921T1537Z"
+OM_RPM="mongodb-mms-${OM_BUILD}.x86_64.rpm"
+OM_RPM_URL="https://downloads.mongodb.com/on-prem-mms/rpm/${OM_RPM}"
+APPDB_VERSION="8.0"
 MDB_VERSION="7.0.14"
-OM_RPM="mongodb-mms-${OM_VERSION}.x86_64.rpm"
+OM_LOCAL_URL="http://127.0.0.1:8080"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OM_RPM_PATH="${OM_RPM_PATH:-${SCRIPT_DIR}/${OM_RPM}}"
 
@@ -30,9 +33,12 @@ PROJECT_NAME="native-lab-project"
 OPLOG_RS_PORT=37017
 RS_PORTS=(37018 37019 37020)
 BACKUP_HEAD_DIR="/data/backup_head"
+SNAPSHOT_STORE_DIR="/data/snapshots"
+FILE_SYSTEM_STORE_ID="native-lab-filesystem"
+OPLOG_STORE_ID="native-lab-oplog"
 
 log() { echo -e "\033[1;32m[native-om-lab]\033[0m $*"; }
-api() { curl -sS --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" "$@"; }
+api() { curl -fsS --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" "$@"; }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this script as root (sudo ./native-ops-manager-lab.sh)"; exit 1
@@ -45,16 +51,9 @@ log "Installing base packages (jq, openssl, initscripts)"
 dnf install -y jq openssl initscripts >/dev/null
 
 if [ ! -s "$OM_RPM_PATH" ]; then
-  cat >&2 <<EOF
-Ops Manager ${OM_VERSION} RPM is required before the lab can continue.
-The direct downloads.mongodb.com URL returned HTTP 403, so download it from:
-  https://www.mongodb.com/try/download/ops-manager
-Select version ${OM_VERSION}, Amazon Linux 2023, RPM, then copy the file here:
-  ${SCRIPT_DIR}/${OM_RPM}
-Or rerun with OM_RPM_PATH=/absolute/path/to/${OM_RPM}.
-The AppDB packages have not been changed by this run.
-EOF
-  exit 1
+  log "Downloading Ops Manager ${OM_VERSION}"
+  OM_RPM_PATH="/tmp/${OM_RPM}"
+  curl -fsSL --retry 3 "$OM_RPM_URL" -o "$OM_RPM_PATH"
 fi
 
 log "Verifying Ops Manager RPM signature"
@@ -65,7 +64,7 @@ rpm -K "$OM_RPM_PATH"
 # ---------------------------------------------------------------------------
 # Step 2: AppDB - single-node MongoDB replica set backing Ops Manager itself
 # ---------------------------------------------------------------------------
-log "Installing MongoDB ${MDB_VERSION%.*} Enterprise for the AppDB"
+log "Installing MongoDB Enterprise ${APPDB_VERSION} for the AppDB"
 community_packages=()
 mapfile -t community_packages < <(rpm -qa 'mongodb-org*')
 if [ "${#community_packages[@]}" -gt 0 ]; then
@@ -75,13 +74,14 @@ if [ "${#community_packages[@]}" -gt 0 ]; then
   dnf remove -y "${community_packages[@]}" >/dev/null
 fi
 rm -f /etc/yum.repos.d/mongodb-org.repo
-cat > /etc/yum.repos.d/mongodb-enterprise-7.0.repo <<EOF
-[mongodb-enterprise-7.0]
+rm -f /etc/yum.repos.d/mongodb-enterprise-7.0.repo
+cat > /etc/yum.repos.d/mongodb-enterprise-8.0.repo <<EOF
+[mongodb-enterprise-8.0]
 name=MongoDB Enterprise Repository
-baseurl=https://repo.mongodb.com/yum/amazon/2023/mongodb-enterprise/7.0/\$basearch/
+baseurl=https://repo.mongodb.com/yum/amazon/2023/mongodb-enterprise/8.0/\$basearch/
 gpgcheck=1
 enabled=1
-gpgkey=https://pgp.mongodb.com/server-7.0.asc
+gpgkey=https://pgp.mongodb.com/server-8.0.asc
 EOF
 dnf install -y mongodb-enterprise >/dev/null
 if [ -s /tmp/native-ops-manager-mongod.conf ]; then
@@ -100,6 +100,11 @@ for i in $(seq 1 30); do mongosh --quiet --eval "db.runCommand('ping')" >/dev/nu
 mongosh --quiet --eval '
   try { rs.status() } catch (e) { rs.initiate({_id:"appdb", members:[{_id:0, host:"127.0.0.1:27017"}]}) }
 '
+APPDB_FCV=$(mongosh --quiet --eval 'db.adminCommand({getParameter:1,featureCompatibilityVersion:1}).featureCompatibilityVersion.version')
+if [ "$APPDB_FCV" != "$APPDB_VERSION" ]; then
+  log "Upgrading AppDB feature compatibility version to ${APPDB_VERSION}"
+  mongosh --quiet --eval "db.adminCommand({setFeatureCompatibilityVersion:'${APPDB_VERSION}',confirm:true})"
+fi
 log "AppDB replica set 'appdb' is up on 127.0.0.1:27017"
 
 # ---------------------------------------------------------------------------
@@ -142,7 +147,7 @@ done
 log "Creating the first Ops Manager user via the unauth bootstrap API"
 FIRST_USER_RESPONSE=$(curl -sS --digest -u "x:x" \
   --header "Content-Type: application/json" \
-  --request POST "http://localhost:8080/api/public/v1.0/unauth/users?whitelist=0.0.0.0%2F0" \
+  --request POST "${OM_LOCAL_URL}/api/public/v1.0/unauth/users?whitelist=127.0.0.1" \
   --data "{\"username\":\"${OM_ADMIN_USER}\",\"password\":\"${OM_ADMIN_PASSWORD}\",\"firstName\":\"Native\",\"lastName\":\"Admin\"}")
 
 PUBLIC_KEY=$(echo "$FIRST_USER_RESPONSE" | jq -r '.programmaticApiKey.publicKey')
@@ -158,7 +163,7 @@ log "Bootstrapped admin user ${OM_ADMIN_USER} (password: ${OM_ADMIN_PASSWORD})"
 # ---------------------------------------------------------------------------
 log "Creating project '${PROJECT_NAME}' (and its organization)"
 PROJECT_RESPONSE=$(api --header "Content-Type: application/json" \
-  --request POST "http://localhost:8080/api/public/v1.0/groups" \
+  --request POST "${OM_LOCAL_URL}/api/public/v1.0/groups" \
   --data "{\"name\":\"${PROJECT_NAME}\"}")
 GROUP_ID=$(echo "$PROJECT_RESPONSE" | jq -r '.id')
 log "Project id: ${GROUP_ID}"
@@ -167,7 +172,7 @@ log "Project id: ${GROUP_ID}"
 # Step 6: create an Agent API key for this project
 # ---------------------------------------------------------------------------
 AGENT_KEY_RESPONSE=$(api --header "Content-Type: application/json" \
-  --request POST "http://localhost:8080/api/public/v1.0/groups/${GROUP_ID}/agentapikeys" \
+  --request POST "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/agentapikeys" \
   --data '{"desc":"native-lab-agent-key"}')
 AGENT_API_KEY=$(echo "$AGENT_KEY_RESPONSE" | jq -r '.key')
 log "Agent API key created"
@@ -177,11 +182,11 @@ log "Agent API key created"
 # ---------------------------------------------------------------------------
 log "Downloading the Automation Agent build matching this Ops Manager version"
 curl -fsSL -o /tmp/mongodb-mms-automation-agent-manager-latest.x86_64.rpm \
-  "http://localhost:8080/download/agent/automation/mongodb-mms-automation-agent-manager-latest.x86_64.rpm"
+  "${OM_LOCAL_URL}/download/agent/automation/mongodb-mms-automation-agent-manager-latest.x86_64.rpm"
 dnf install -y /tmp/mongodb-mms-automation-agent-manager-latest.x86_64.rpm >/dev/null
 
 AGENT_CONF=/etc/mongodb-mms/automation-agent.config
-sed -i "s|^mmsGroupId=.*|mmsGroupId=${GROUP_ID}|; s|^mmsApiKey=.*|mmsApiKey=${AGENT_API_KEY}|; s|^mmsBaseUrl=.*|mmsBaseUrl=http://localhost:8080|" "$AGENT_CONF"
+sed -i "s|^mmsGroupId=.*|mmsGroupId=${GROUP_ID}|; s|^mmsApiKey=.*|mmsApiKey=${AGENT_API_KEY}|; s|^mmsBaseUrl=.*|mmsBaseUrl=${OM_LOCAL_URL}|" "$AGENT_CONF"
 
 mkdir -p /data/oplog-rs /data/my-replica-set/rs0 /data/my-replica-set/rs1 /data/my-replica-set/rs2 "$BACKUP_HEAD_DIR"
 chown -R mongodb-mms:mongodb-mms /data "$BACKUP_HEAD_DIR"
@@ -191,7 +196,7 @@ systemctl enable --now mongodb-mms-automation-agent
 log "Waiting for the Automation Agent to register this host with the project"
 HOSTNAME_IN_OM=""
 for i in $(seq 1 30); do
-  HOSTS_RESPONSE=$(api "http://localhost:8080/api/public/v1.0/groups/${GROUP_ID}/hosts")
+  HOSTS_RESPONSE=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/hosts")
   HOSTNAME_IN_OM=$(echo "$HOSTS_RESPONSE" | jq -r '.results[0].hostname // empty')
   [ -n "$HOSTNAME_IN_OM" ] && break
   echo "  waiting for agent check-in ($i/30)"; sleep 10
@@ -205,7 +210,7 @@ log "Host registered in Ops Manager as: ${HOSTNAME_IN_OM}"
 # Step 8: build and push the automation config (oplog store + 3-node RS)
 # ---------------------------------------------------------------------------
 log "Pushing automation config: oplog-rs (1 node) + my-replica-set (3 nodes)"
-CURRENT_CONFIG=$(api "http://localhost:8080/api/public/v1.0/groups/${GROUP_ID}/automationConfig")
+CURRENT_CONFIG=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automationConfig")
 
 NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
   --arg host "$HOSTNAME_IN_OM" \
@@ -249,13 +254,13 @@ NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
 ')
 
 api --header "Content-Type: application/json" \
-  --request PUT "http://localhost:8080/api/public/v1.0/groups/${GROUP_ID}/automationConfig" \
+  --request PUT "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automationConfig" \
   --data "$NEW_CONFIG" -o /dev/null -w "PUT automationConfig -> HTTP %{http_code}\n"
 
 log "Waiting for the Automation Agent to reach goal state (deploys + starts mongod processes)"
 TARGET_VERSION=$(echo "$NEW_CONFIG" | jq -r '.version')
 for i in $(seq 1 60); do
-  STATUS=$(api "http://localhost:8080/api/public/v1.0/groups/${GROUP_ID}/automationStatus")
+  STATUS=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automationStatus")
   MIN_VERSION=$(echo "$STATUS" | jq '[.processes[].lastGoalVersionAchieved] | min // 0')
   echo "  goal version target=${TARGET_VERSION} min-achieved=${MIN_VERSION} ($i/60)"
   [ "$MIN_VERSION" -ge "$TARGET_VERSION" ] 2>/dev/null && break
@@ -263,7 +268,113 @@ for i in $(seq 1 60); do
 done
 
 # ---------------------------------------------------------------------------
-# Step 9: everything scriptable is done - print login info + the one manual backup step
+# Step 9: configure backup entirely through the Ops Manager API
+# ---------------------------------------------------------------------------
+if [ "$MIN_VERSION" -lt "$TARGET_VERSION" ]; then
+  echo "Automation did not reach its goal version; refusing to configure backup." >&2
+  exit 1
+fi
+
+BACKUP_API="${OM_LOCAL_URL}/api/public/v1.0/admin/backup"
+mkdir -p "$BACKUP_HEAD_DIR" "$SNAPSHOT_STORE_DIR"
+chown -R mongodb-mms:mongodb-mms "$BACKUP_HEAD_DIR" "$SNAPSHOT_STORE_DIR"
+
+log "Configuring the Backup Daemon"
+BACKUP_DAEMONS=$(api "${BACKUP_API}/daemon/configs")
+DAEMON_BODY=$(jq -n \
+  --arg machine "$HOSTNAME_IN_OM" \
+  --arg headRootDirectory "${BACKUP_HEAD_DIR}/" \
+  '{assignmentEnabled:true,backupJobsEnabled:true,configured:true,
+    garbageCollectionEnabled:true,headDiskType:"SSD",
+    machine:{headRootDirectory:$headRootDirectory,machine:$machine},
+    numWorkers:2,resourceUsageEnabled:true,restoreQueryableJobsEnabled:true}')
+DAEMON_MATCH=$(echo "$BACKUP_DAEMONS" | jq -r \
+  --arg machine "$HOSTNAME_IN_OM" \
+  --arg head "${BACKUP_HEAD_DIR}/" \
+  '[.results[]? | select(.machine.machine == $machine and .machine.headRootDirectory == $head)] | length')
+if [ "$DAEMON_MATCH" -gt 0 ]; then
+  HEAD_PATH_ENCODED=$(jq -rn --arg path "${BACKUP_HEAD_DIR}/" '$path | @uri')
+  api --header "Content-Type: application/json" \
+    --request PUT "${BACKUP_API}/daemon/configs/${HOSTNAME_IN_OM}/${HEAD_PATH_ENCODED}" \
+    --data "$DAEMON_BODY" >/dev/null
+else
+  api --header "Content-Type: application/json" \
+    --request PUT "${BACKUP_API}/daemon/configs/${HOSTNAME_IN_OM}/" \
+    --data "$DAEMON_BODY" >/dev/null
+fi
+
+log "Registering the filesystem snapshot store"
+FILESYSTEM_CONFIGS=$(api "${BACKUP_API}/snapshot/fileSystemConfigs")
+FILESYSTEM_EXISTS=$(echo "$FILESYSTEM_CONFIGS" | jq -r \
+  --arg id "$FILE_SYSTEM_STORE_ID" \
+  '[.results[]? | select(.id == $id)] | length')
+if [ "$FILESYSTEM_EXISTS" -gt 0 ]; then
+  FILESYSTEM_BODY=$(jq -n --arg path "$SNAPSHOT_STORE_DIR" \
+    '{assignmentEnabled:true,loadFactor:1,storePath:$path,wtCompressionSetting:"GZIP"}')
+  api --header "Content-Type: application/json" \
+    --request PUT "${BACKUP_API}/snapshot/fileSystemConfigs/${FILE_SYSTEM_STORE_ID}" \
+    --data "$FILESYSTEM_BODY" >/dev/null
+else
+  FILESYSTEM_BODY=$(jq -n --arg id "$FILE_SYSTEM_STORE_ID" --arg path "$SNAPSHOT_STORE_DIR" \
+    '{assignmentEnabled:true,id:$id,loadFactor:1,storePath:$path,wtCompressionSetting:"GZIP"}')
+  api --header "Content-Type: application/json" \
+    --request POST "${BACKUP_API}/snapshot/fileSystemConfigs" \
+    --data "$FILESYSTEM_BODY" >/dev/null
+fi
+
+log "Registering oplog-rs as the Oplog Store"
+OPLOG_CONFIGS=$(api "${BACKUP_API}/oplog/mongoConfigs")
+OPLOG_EXISTS=$(echo "$OPLOG_CONFIGS" | jq -r \
+  --arg id "$OPLOG_STORE_ID" \
+  '[.results[]? | select(.id == $id)] | length')
+OPLOG_URI="mongodb://127.0.0.1:${OPLOG_RS_PORT}/?replicaSet=oplog-rs"
+if [ "$OPLOG_EXISTS" -gt 0 ]; then
+  OPLOG_BODY=$(jq -n --arg uri "$OPLOG_URI" \
+    '{assignmentEnabled:true,encryptedCredentials:false,uri:$uri,ssl:false,writeConcern:"ACKNOWLEDGED"}')
+  api --header "Content-Type: application/json" \
+    --request PUT "${BACKUP_API}/oplog/mongoConfigs/${OPLOG_STORE_ID}" \
+    --data "$OPLOG_BODY" >/dev/null
+else
+  OPLOG_BODY=$(jq -n --arg id "$OPLOG_STORE_ID" --arg uri "$OPLOG_URI" \
+    '{assignmentEnabled:true,encryptedCredentials:false,id:$id,uri:$uri,ssl:false,writeConcern:"ACKNOWLEDGED"}')
+  api --header "Content-Type: application/json" \
+    --request POST "${BACKUP_API}/oplog/mongoConfigs" \
+    --data "$OPLOG_BODY" >/dev/null
+fi
+
+log "Enabling backup and configuring the snapshot schedule"
+CLUSTERS=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/clusters")
+CLUSTER_ID=$(echo "$CLUSTERS" | jq -r \
+  '[.results[] | select(.replicaSetName == "my-replica-set") | .id][0] // empty')
+if [ -z "$CLUSTER_ID" ]; then
+  echo "Ops Manager did not return the my-replica-set cluster ID." >&2
+  exit 1
+fi
+
+api --header "Content-Type: application/json" \
+  --request PATCH "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/backupConfigs/${CLUSTER_ID}" \
+  --data '{"statusName":"STARTED","storageEngineName":"WIRED_TIGER","syncSource":"primary"}' >/dev/null
+api --header "Content-Type: application/json" \
+  --request PATCH "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/backupConfigs/${CLUSTER_ID}/snapshotSchedule" \
+  --data '{"snapshotIntervalHours":24,"snapshotRetentionDays":2,"fullIncrementalDayOfWeek":"SUNDAY"}' >/dev/null
+ON_DEMAND_RESPONSE=""
+for i in $(seq 1 20); do
+  if ON_DEMAND_RESPONSE=$(api --request POST \
+    "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/clusters/${CLUSTER_ID}/snapshots/onDemandSnapshot?retentionDays=2" 2>/tmp/native-ops-manager-snapshot-api.err); then
+    break
+  fi
+  echo "  waiting for the Backup Daemon to accept the snapshot request ($i/20)"
+  sleep 15
+done
+if [ -z "$ON_DEMAND_RESPONSE" ]; then
+  cat /tmp/native-ops-manager-snapshot-api.err >&2
+  echo "Backup was enabled, but Ops Manager did not accept the initial snapshot request." >&2
+  exit 1
+fi
+ON_DEMAND_DESCRIPTION=$(echo "$ON_DEMAND_RESPONSE" | jq -r '.description // "accepted"')
+
+# ---------------------------------------------------------------------------
+# Step 10: print login information and automated backup result
 # ---------------------------------------------------------------------------
 CREDS_FILE=/root/ops-manager-credentials.txt
 cat > "$CREDS_FILE" <<EOF
@@ -287,22 +398,9 @@ HOW TO LOG IN:
   These are also saved on this host at ${CREDS_FILE} (root-readable only)
   in case you lose this terminal output - copy them somewhere safe now.
 
-  Project:         ${PROJECT_NAME}
-  Deployments:     oplog-rs (1 node, port ${OPLOG_RS_PORT})
-                   my-replica-set (3 nodes, ports ${RS_PORTS[*]})
-
--------------------------------------------------------------------
-ONE MANUAL STEP - enabling Filesystem-store Backup
-(Ops Manager has no stable public API for first-time Backup Daemon /
-Snapshot Store setup - this is a short UI wizard.)
-
-1. Log into the UI above, click Admin (top right) -> Backup tab.
-2. Configure the Backup Daemon: set the head directory to
-   ${BACKUP_HEAD_DIR}
-3. Add Snapshot Storage -> choose "File System Store", point it at any
-   local directory (e.g. /data/snapshots - create it with
-   'sudo mkdir -p /data/snapshots && sudo chown mongodb-mms /data/snapshots').
-4. Assign oplog-rs as the Oplog Store Database for this project.
-5. Go to Deployment -> my-replica-set -> Backup tab -> Start/Enable Backup.
--------------------------------------------------------------------
+    Project:         ${PROJECT_NAME}
+    Deployments:     oplog-rs (1 node, port ${OPLOG_RS_PORT})
+               my-replica-set (3 nodes, ports ${RS_PORTS[*]})
+    Backup:          enabled; filesystem store ${SNAPSHOT_STORE_DIR}
+    Initial snapshot: ${ON_DEMAND_DESCRIPTION}
 EOF
