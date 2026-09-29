@@ -132,12 +132,20 @@ EOF
 systemctl enable --now mongodb-mms
 
 log "Waiting for Ops Manager HTTP to come up (first boot can take several minutes)"
-for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080/user/login" || true)
-  echo "  http://localhost:8080 -> ${code:-none} ($i/60)"
-  [ "$code" = "200" ] && break
+OM_UP=false
+for i in $(seq 1 40); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${OM_LOCAL_URL}/user/login" || true)
+  echo "  ${OM_LOCAL_URL} -> ${code:-none} ($i/40)"
+  if [ "$code" = "200" ]; then OM_UP=true; break; fi
+  if [ "$i" -ge 8 ] && ! systemctl is-active --quiet mongodb-mms; then break; fi
   sleep 15
 done
+if [ "$OM_UP" != true ]; then
+  echo "Ops Manager did not start. Diagnostics:" >&2
+  systemctl status mongodb-mms --no-pager -l 2>&1 | head -20 >&2 || true
+  tail -n 40 /opt/mongodb/mms/logs/mms0-startup.log /opt/mongodb/mms/logs/mms0.log 2>&1 >&2 || true
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4: bootstrap the first user + Global Owner API key (fully headless)
