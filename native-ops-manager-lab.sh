@@ -41,8 +41,8 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: base packages
 # ---------------------------------------------------------------------------
-log "Installing base packages (jq, curl, openssl, initscripts)"
-dnf install -y jq curl openssl initscripts >/dev/null
+log "Installing base packages (jq, openssl, initscripts)"
+dnf install -y jq openssl initscripts >/dev/null
 
 # ---------------------------------------------------------------------------
 # Step 2: AppDB - single-node MongoDB replica set backing Ops Manager itself
