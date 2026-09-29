@@ -39,7 +39,7 @@ FILE_SYSTEM_STORE_ID="native-lab-filesystem"
 OPLOG_STORE_ID="native-lab-oplog"
 
 log() { echo -e "\033[1;32m[native-om-lab]\033[0m $*"; }
-api() { curl -fsS --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" "$@"; }
+api() { curl --fail-with-body -sS --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" "$@"; }
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this script as root (sudo ./native-ops-manager-lab.sh)"; exit 1
@@ -404,13 +404,13 @@ FILESYSTEM_EXISTS=$(echo "$FILESYSTEM_CONFIGS" | jq -r \
   '[.results[]? | select(.id == $id)] | length')
 if [ "$FILESYSTEM_EXISTS" -gt 0 ]; then
   FILESYSTEM_BODY=$(jq -n --arg path "$SNAPSHOT_STORE_DIR" \
-    '{assignmentEnabled:true,loadFactor:1,storePath:$path,wtCompressionSetting:"GZIP"}')
+    '{assignmentEnabled:true,loadFactor:1,storePath:$path,mmapv1CompressionSetting:"NONE",wtCompressionSetting:"GZIP"}')
   api --header "Content-Type: application/json" \
     --request PUT "${BACKUP_API}/snapshot/fileSystemConfigs/${FILE_SYSTEM_STORE_ID}" \
     --data "$FILESYSTEM_BODY" >/dev/null
 else
   FILESYSTEM_BODY=$(jq -n --arg id "$FILE_SYSTEM_STORE_ID" --arg path "$SNAPSHOT_STORE_DIR" \
-    '{assignmentEnabled:true,id:$id,loadFactor:1,storePath:$path,wtCompressionSetting:"GZIP"}')
+    '{assignmentEnabled:true,id:$id,loadFactor:1,storePath:$path,mmapv1CompressionSetting:"NONE",wtCompressionSetting:"GZIP"}')
   api --header "Content-Type: application/json" \
     --request POST "${BACKUP_API}/snapshot/fileSystemConfigs" \
     --data "$FILESYSTEM_BODY" >/dev/null
