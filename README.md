@@ -71,6 +71,9 @@ required.
 
 Total time: 10-20 minutes, mostly package downloads and Ops Manager's first boot.
 
+To repeat a failed run on the same VM, use `sudo RESET_OM=1 ./native-ops-manager-lab.sh`.
+It wipes Ops Manager state (users, projects, agent, managed deployments) but keeps the installed packages.
+
 ## How to log into the Ops Manager UI afterwards
 
 This is the part that's easy to lose track of, so to be explicit:

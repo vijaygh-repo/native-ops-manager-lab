@@ -149,6 +149,21 @@ if [ "$APPDB_FCV" != "$APPDB_VERSION" ]; then
 fi
 log "AppDB replica set 'appdb' is up on 127.0.0.1:27017-27019"
 
+# RESET_OM=1 wipes Ops Manager state (users, projects, agent, managed mongods) so a failed run can be repeated.
+if [ "${RESET_OM:-0}" = "1" ]; then
+  log "RESET_OM=1: wiping previous Ops Manager state"
+  systemctl stop mongodb-mms-automation-agent mongodb-mms 2>/dev/null || true
+  pkill -u mongodb-mms -x mongod 2>/dev/null || true
+  mongosh --quiet --eval '
+    db.adminCommand({listDatabases:1}).databases
+      .filter(d => !["admin","local","config"].includes(d.name))
+      .forEach(d => db.getSiblingDB(d.name).dropDatabase())
+  ' >/dev/null
+  rpm -q mongodb-mms-automation-agent-manager >/dev/null 2>&1 && rpm -e mongodb-mms-automation-agent-manager
+  rm -rf /var/lib/mongodb-mms-automation /var/log/mongodb-mms-automation /etc/mongodb-mms/automation-agent.config* \
+    /data/oplog-rs /data/my-replica-set "$BACKUP_HEAD_DIR" "$SNAPSHOT_STORE_DIR"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 3: install and start Ops Manager
 # ---------------------------------------------------------------------------
