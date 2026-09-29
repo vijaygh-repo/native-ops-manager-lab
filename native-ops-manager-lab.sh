@@ -264,7 +264,11 @@ AGENT_CONF=/etc/mongodb-mms/automation-agent.config
 sed -i "s|^mmsGroupId=.*|mmsGroupId=${GROUP_ID}|; s|^mmsApiKey=.*|mmsApiKey=${AGENT_API_KEY}|; s|^mmsBaseUrl=.*|mmsBaseUrl=${OM_LOCAL_URL}|" "$AGENT_CONF"
 
 mkdir -p /data/oplog-rs /data/my-replica-set/rs0 /data/my-replica-set/rs1 /data/my-replica-set/rs2 "$BACKUP_HEAD_DIR"
-chown -R mongodb-mms:mongodb-mms /data "$BACKUP_HEAD_DIR"
+# The agent runs as its own service user (not mongodb-mms) and must own the mongod data dirs.
+AGENT_USER="$(systemctl show -p User --value mongodb-mms-automation-agent)"
+AGENT_USER="${AGENT_USER:-mongod}"
+chown -R "${AGENT_USER}:${AGENT_USER}" /data/oplog-rs /data/my-replica-set
+chown -R mongodb-mms:mongodb-mms "$BACKUP_HEAD_DIR"
 
 systemctl enable --now mongodb-mms-automation-agent
 
