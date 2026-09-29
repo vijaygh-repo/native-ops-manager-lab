@@ -155,7 +155,12 @@ log "AppDB replica set 'appdb' is up on 127.0.0.1:27017-27019"
 log "Installing Ops Manager ${OM_VERSION}"
 dnf install -y "$OM_RPM_PATH" >/dev/null
 
-EC2_IP="$(curl -fsS -m 2 http://169.254.169.254/latest/meta-data/local-ipv4 || hostname -I | awk '{print $1}')"
+# IMDSv2 (token required); prefer the public IP so browser redirects work.
+IMDS_TOKEN="$(curl -fsS -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' || true)"
+imds() { curl -fsS -m 2 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true; }
+EC2_IP="$(imds public-ipv4)"
+[ -n "$EC2_IP" ] || EC2_IP="$(imds local-ipv4)"
+[ -n "$EC2_IP" ] || EC2_IP="$(hostname -I | awk '{print $1}')"
 
 CONF=/opt/mongodb/mms/conf/conf-mms.properties
 log "Writing $CONF"
