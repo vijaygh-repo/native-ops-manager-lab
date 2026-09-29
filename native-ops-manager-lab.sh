@@ -497,7 +497,7 @@ HOW TO LOG IN:
   in case you lose this terminal output - copy them somewhere safe now.
 
   Project:         ${PROJECT_NAME}
-  AppDB:           MongoDB Enterprise ${APPDB_VERSION} (1 node)
+  AppDB:           MongoDB Enterprise ${APPDB_VERSION} (3 nodes)
   Deployments:     MongoDB Enterprise ${MDB_VERSION}
                    oplog-rs (1 node, port ${OPLOG_RS_PORT})
                    my-replica-set (3 nodes, ports ${RS_PORTS[*]})
