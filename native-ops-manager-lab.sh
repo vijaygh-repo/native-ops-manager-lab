@@ -202,10 +202,13 @@ fi
 # Step 4: bootstrap the first user + Global Owner API key (fully headless)
 # ---------------------------------------------------------------------------
 log "Creating the first Ops Manager user via the unauth bootstrap API"
-FIRST_USER_RESPONSE=$(curl -sS --digest -u "x:x" \
+FIRST_USER_BODY=$(jq -n --arg u "$OM_ADMIN_USER" --arg p "$OM_ADMIN_PASSWORD" \
+  '{username:$u,password:$p,emailAddress:$u,firstName:"Native",lastName:"Admin"}')
+# No --digest: curl sends an empty probe body first, which OM 9 rejects as INVALID_JSON.
+FIRST_USER_RESPONSE=$(curl -sS \
   --header "Content-Type: application/json" \
   --request POST "${OM_LOCAL_URL}/api/public/v1.0/unauth/users?whitelist=127.0.0.1" \
-  --data "{\"username\":\"${OM_ADMIN_USER}\",\"password\":\"${OM_ADMIN_PASSWORD}\",\"firstName\":\"Native\",\"lastName\":\"Admin\"}")
+  --data "$FIRST_USER_BODY")
 
 PUBLIC_KEY=$(echo "$FIRST_USER_RESPONSE" | jq -r '.programmaticApiKey.publicKey')
 PRIVATE_KEY=$(echo "$FIRST_USER_RESPONSE" | jq -r '.programmaticApiKey.privateKey')
