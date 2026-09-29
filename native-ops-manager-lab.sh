@@ -297,12 +297,13 @@ CURRENT_CONFIG=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automat
 NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
   --arg host "$HOSTNAME_IN_OM" \
   --arg version "$MDB_VERSION" \
-  --argjson versionSpec "$MDB_VERSION_SPEC" \
+  --slurpfile versionSpecFile <(echo "$MDB_VERSION_SPEC") \
   --argjson oplogPort "$OPLOG_RS_PORT" \
   --argjson p0 "${RS_PORTS[0]}" \
   --argjson p1 "${RS_PORTS[1]}" \
   --argjson p2 "${RS_PORTS[2]}" '
   .auth.disabled = true |
+  $versionSpecFile[0] as $versionSpec |
   .version += 1 |
   .mongoDbVersions = (((.mongoDbVersions // []) | map(select(.name != $versionSpec.name))) + [$versionSpec]) |
   .processes += [
@@ -341,9 +342,10 @@ NEW_CONFIG=$(echo "$CURRENT_CONFIG" | jq \
   ]
 ')
 
+echo "$NEW_CONFIG" > /tmp/automation-config.json
 api --header "Content-Type: application/json" \
   --request PUT "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/automationConfig" \
-  --data "$NEW_CONFIG" -o /dev/null -w "PUT automationConfig -> HTTP %{http_code}\n"
+  --data-binary @/tmp/automation-config.json -o /dev/null -w "PUT automationConfig -> HTTP %{http_code}\n"
 
 log "Waiting for the Automation Agent to reach goal state (deploys + starts mongod processes)"
 TARGET_VERSION=$(echo "$NEW_CONFIG" | jq -r '.version')
