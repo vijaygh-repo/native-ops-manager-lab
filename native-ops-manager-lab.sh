@@ -164,8 +164,9 @@ EC2_IP="$(imds public-ipv4)"
 
 CONF=/opt/mongodb/mms/conf/conf-mms.properties
 log "Writing $CONF"
+sed -i '/^# native-om-lab begin/,/^# native-om-lab end/d' "$CONF"
 cat >> "$CONF" <<EOF
-
+# native-om-lab begin
 mongo.mongoUri=mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=appdb
 mms.centralUrl=http://${EC2_IP}:8080
 mms.ignoreInitialUiSetup=true
@@ -176,6 +177,7 @@ mms.adminEmailAddr=mms-admin@example.com
 mms.mail.transport=smtp
 mms.mail.hostname=localhost
 mms.mail.port=25
+# native-om-lab end
 EOF
 
 systemctl enable --now mongodb-mms
@@ -185,7 +187,7 @@ OM_UP=false
 for i in $(seq 1 40); do
   code=$(curl -s -o /dev/null -w '%{http_code}' "${OM_LOCAL_URL}/user/login" || true)
   echo "  ${OM_LOCAL_URL} -> ${code:-none} ($i/40)"
-  if [ "$code" = "200" ]; then OM_UP=true; break; fi
+  case "$code" in 200|30[1-8]) OM_UP=true; break ;; esac
   if [ "$i" -ge 8 ] && ! systemctl is-active --quiet mongodb-mms; then break; fi
   sleep 15
 done
