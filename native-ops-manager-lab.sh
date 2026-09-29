@@ -256,8 +256,8 @@ systemctl enable --now mongodb-mms-automation-agent
 log "Waiting for the Automation Agent to register this host with the project"
 HOSTNAME_IN_OM=""
 for i in $(seq 1 30); do
-  HOSTS_RESPONSE=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/hosts")
-  HOSTNAME_IN_OM=$(echo "$HOSTS_RESPONSE" | jq -r '.results[0].hostname // empty')
+  HOSTS_RESPONSE=$(api "${OM_LOCAL_URL}/api/public/v1.0/groups/${GROUP_ID}/agents/AUTOMATION" || true)
+  HOSTNAME_IN_OM=$(echo "$HOSTS_RESPONSE" | jq -r '.results[0].hostname // empty' 2>/dev/null || true)
   [ -n "$HOSTNAME_IN_OM" ] && break
   echo "  waiting for agent check-in ($i/30)"; sleep 10
 done
