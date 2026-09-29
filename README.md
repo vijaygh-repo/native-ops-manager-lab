@@ -4,7 +4,7 @@ A single-EC2-instance lab that installs **Ops Manager directly on the host**
 via the traditional rpm install - no K3s, no kind, no MongoDB Kubernetes
 Operator. Everything is colocated on one VM:
 
-- A single-node **MongoDB Enterprise 8.0** replica set as the Ops Manager **Application Database (AppDB)**
+- A 3-node (one host, ports 27017-27019) **MongoDB Enterprise 8.0** replica set as the Ops Manager **Application Database (AppDB)**
 - **Ops Manager 9.0.0** itself
 - The **MongoDB Automation Agent**, deploying on the same host:
   - `oplog-rs` - a 1-node **Enterprise** replica set used as the Backup **Oplog Store**
@@ -15,7 +15,7 @@ Operator. Everything is colocated on one VM:
 ```mermaid
 flowchart TB
     subgraph EC2["EC2 instance (single VM)"]
-        APPDB["AppDB (Enterprise 8.0, 1 node)\nport 27017"]
+        APPDB["AppDB (Enterprise 8.0, 3 nodes)\nports 27017-27019"]
         OM["Ops Manager 9.0.0\nport 8080"]
         AGENT["MongoDB Automation Agent"]
         OPLOG["oplog-rs (Enterprise 7.0.14, 1 node)\nport 37017"]
@@ -127,7 +127,7 @@ cleanup script since nothing is created outside this VM.
 
 - Authentication is disabled on `oplog-rs` and `my-replica-set` (test lab
   only) to keep the automation config simple - do not do this outside a lab.
-- Single-node AppDB and single-node oplog store are not highly available;
+- The AppDB (3 members on one host) and the single-node oplog store are not highly available;
   this is a functional/test setup, not a production topology.
 - AppDB runs MongoDB Enterprise 8.0. The oplog store and workload replica set
   run MongoDB Enterprise 7.0.14.

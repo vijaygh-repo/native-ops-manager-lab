@@ -3,7 +3,7 @@
 #
 # Single-VM, non-Kubernetes lab: installs Ops Manager directly on this EC2 host
 # (Amazon Linux 2023, x86_64) using the traditional rpm-based install, backed by
-# a single-node AppDB, and deploys a 3-node MongoDB replica set + a 1-node Oplog
+# a 3-node AppDB, and deploys a 3-node MongoDB replica set + a 1-node Oplog
 # Store replica set through the Automation Agent - everything colocated on this
 # one VM. Backup uses a Filesystem Snapshot Store (no Blockstore needed).
 #
@@ -21,6 +21,7 @@ OM_BUILD="9.0.0.500.20260921T1537Z"
 OM_RPM="mongodb-mms-${OM_BUILD}.x86_64.rpm"
 OM_RPM_URL="https://downloads.mongodb.com/on-prem-mms/rpm/${OM_RPM}"
 APPDB_VERSION="8.0"
+APPDB_PORTS=(27017 27018 27019)
 MDB_VERSION="7.0.14-ent"
 OM_LOCAL_URL="http://127.0.0.1:8080"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,7 +64,7 @@ rpm --import /tmp/opsmanager-signing-key.asc
 rpm -K "$OM_RPM_PATH"
 
 # ---------------------------------------------------------------------------
-# Step 2: AppDB - single-node MongoDB replica set backing Ops Manager itself
+# Step 2: AppDB - 3-node replica set (one host) backing Ops Manager; OM 9 pre-flight requires 3 nodes
 # ---------------------------------------------------------------------------
 log "Installing MongoDB Enterprise ${APPDB_VERSION} for the AppDB"
 community_packages=()
@@ -92,18 +93,61 @@ if ! grep -q "^replication:" /etc/mongod.conf; then
 fi
 systemctl enable --now mongod
 
-log "Waiting for AppDB mongod to accept connections"
-for i in $(seq 1 30); do mongosh --quiet --eval "db.runCommand('ping')" >/dev/null 2>&1 && break; sleep 2; done
+for port in 27018 27019; do
+  mkdir -p "/var/lib/mongo-appdb-${port}"
+  chown mongod:mongod "/var/lib/mongo-appdb-${port}"
+  cat > "/etc/mongod-appdb-${port}.conf" <<EOF
+storage:
+  dbPath: /var/lib/mongo-appdb-${port}
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod-appdb-${port}.log
+net:
+  port: ${port}
+  bindIp: 127.0.0.1
+replication:
+  replSetName: appdb
+EOF
+  cat > "/etc/systemd/system/mongod-appdb-${port}.service" <<EOF
+[Unit]
+Description=MongoDB AppDB member on port ${port}
+After=network.target
+
+[Service]
+User=mongod
+Group=mongod
+ExecStart=/usr/bin/mongod -f /etc/mongod-appdb-${port}.conf
+LimitNOFILE=64000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+done
+systemctl daemon-reload
+systemctl enable --now mongod-appdb-27018 mongod-appdb-27019
+
+log "Waiting for all 3 AppDB mongod processes to accept connections"
+for port in "${APPDB_PORTS[@]}"; do
+  for i in $(seq 1 30); do mongosh --quiet --port "$port" --eval "db.runCommand('ping')" >/dev/null 2>&1 && break; sleep 2; done
+done
 
 mongosh --quiet --eval '
-  try { rs.status() } catch (e) { rs.initiate({_id:"appdb", members:[{_id:0, host:"127.0.0.1:27017"}]}) }
+  try { rs.status() } catch (e) {
+    rs.initiate({_id:"appdb", members:[
+      {_id:0, host:"127.0.0.1:27017"}, {_id:1, host:"127.0.0.1:27018"}, {_id:2, host:"127.0.0.1:27019"}]})
+  }
 '
+log "Waiting for an AppDB primary"
+for i in $(seq 1 60); do
+  [ "$(mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null)" = "true" ] && break; sleep 2
+done
 APPDB_FCV=$(mongosh --quiet --eval 'db.adminCommand({getParameter:1,featureCompatibilityVersion:1}).featureCompatibilityVersion.version')
 if [ "$APPDB_FCV" != "$APPDB_VERSION" ]; then
   log "Upgrading AppDB feature compatibility version to ${APPDB_VERSION}"
   mongosh --quiet --eval "db.adminCommand({setFeatureCompatibilityVersion:'${APPDB_VERSION}',confirm:true})"
 fi
-log "AppDB replica set 'appdb' is up on 127.0.0.1:27017"
+log "AppDB replica set 'appdb' is up on 127.0.0.1:27017-27019"
 
 # ---------------------------------------------------------------------------
 # Step 3: install and start Ops Manager
@@ -117,7 +161,7 @@ CONF=/opt/mongodb/mms/conf/conf-mms.properties
 log "Writing $CONF"
 cat >> "$CONF" <<EOF
 
-mongo.mongoUri=mongodb://127.0.0.1:27017/?replicaSet=appdb
+mongo.mongoUri=mongodb://127.0.0.1:27017,127.0.0.1:27018,127.0.0.1:27019/?replicaSet=appdb
 mms.centralUrl=http://${EC2_IP}:8080
 mms.ignoreInitialUiSetup=true
 mms.user.invitationOnly=true
